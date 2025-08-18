@@ -1,4 +1,3 @@
-
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 from __future__ import annotations
@@ -15,10 +14,15 @@ from pydantic import BaseModel
 import extapi_core
 
 EXTAPI_JSON = Path(os.getenv("EXTAPI_JSON", "extension_api.json")).resolve()
-ALLOWED_ORIGINS = [o.strip() for o in os.getenv("ALLOWED_ORIGINS","https://cpp.lizapeproprio.shop").split(",") if o.strip()]
+ALLOWED_ORIGINS = [o.strip() for o in os.getenv("ALLOWED_ORIGINS", "https://cpp.lizapeproprio.shop").split(",") if o.strip()]
 API_KEY = os.getenv("EXTAPI_KEY", "")
-VALID_CONFIGS = set([c.strip() for c in os.getenv("EXTAPI_CONFIGS", "float_32,float_64").split(",") if c.strip()])
+VALID_CONFIGS = set(c.strip() for c in os.getenv("EXTAPI_CONFIGS", "float_32,float_64").split(",") if c.strip())
 OPEN_PATHS = {"/health"}
+
+# liberar docs/openapi sem chave apenas quando ligado
+OPEN_DOCS = os.getenv("OPEN_DOCS", "0") == "1"
+if OPEN_DOCS:
+    OPEN_PATHS.update({"/openapi.json", "/docs", "/redoc"})
 
 class _ApiState:
     def __init__(self, p: Path):
@@ -26,39 +30,46 @@ class _ApiState:
         self._mtime = 0.0
         self._ext: Optional[extapi_core.ExtApi] = None
         self._load()
+
     def _load(self):
         if not self.p.exists():
             raise FileNotFoundError(f"extension_api.json não encontrado em, {self.p}")
         self._ext = extapi_core.ExtApi(self.p)
         self._mtime = self.p.stat().st_mtime
+
     def maybe_reload(self):
         m = self.p.stat().st_mtime
         if m > self._mtime:
             self._load()
+
     @property
     def ext(self) -> extapi_core.ExtApi:
         if self._ext is None:
             self._load()
         return self._ext  # type: ignore
+
     @property
     def mtime(self) -> float:
         return self._mtime
 
 state = _ApiState(EXTAPI_JSON)
-app = FastAPI(title="extapi_http", version="1.0.1")
+app = FastAPI(title="extapi_http", version="1.0.2")
+
+# wildcard => sem credentials para não conflitar CORS
+allow_credentials = True
+if any(o == "*" for o in ALLOWED_ORIGINS):
+    allow_credentials = False
 
 app.add_middleware(
     CORSMiddleware,
     allow_origins=ALLOWED_ORIGINS,
-    allow_credentials=True,
-    allow_methods=["GET","POST","OPTIONS"],
+    allow_credentials=allow_credentials,
+    allow_methods=["GET", "POST", "OPTIONS"],
     allow_headers=["*"],
 )
 
 def _normalize(s: Optional[str]) -> Optional[str]:
-    if s is None:
-        return None
-    return s.strip()
+    return s.strip() if s is not None else None
 
 @app.middleware("http")
 async def api_key_guard(request: Request, call_next):
@@ -69,10 +80,9 @@ async def api_key_guard(request: Request, call_next):
 
     incoming = request.headers.get("x-api-key")
     if incoming is None:
-        # tenta forma "Authorization: Bearer <key>"
         auth = request.headers.get("authorization")
         if auth and auth.lower().startswith("bearer "):
-            incoming = auth[7:]  # remove "Bearer "
+            incoming = auth[7:]
 
     incoming = _normalize(incoming)
     expected = _normalize(API_KEY)
@@ -87,18 +97,21 @@ class RouteQuery(BaseModel):
 
 def _validate_config_or_400(config: Optional[str]) -> None:
     if config and VALID_CONFIGS and config not in VALID_CONFIGS:
-        from fastapi import HTTPException
         valid = ", ".join(sorted(VALID_CONFIGS))
         raise HTTPException(status_code=400, detail=f"config inválida, use uma destas, {valid}")
 
 @app.get("/health")
 def health():
     state.maybe_reload()
+    info = state.ext.info()
     return {
         "status": "ok",
-        "counts": state.ext.info(),
+        "counts": info,
         "port": int(os.getenv("PORT", "3737")),
         "allowed_origins": ALLOWED_ORIGINS,
+        "json_mtime": state.mtime,
+        "open_docs": OPEN_DOCS,
+        "allow_credentials": allow_credentials,
     }
 
 @app.get("/info")
@@ -128,7 +141,7 @@ def methods_by_name(name: str, cls: Optional[str] = None):
     return state.ext.find_methods(name, cls=cls)
 
 @app.get("/methods/by-hash")
-def methods_by_hash(hash: str):
+def methods_by_hash(hash: str = Query(..., description="hash do método, decimal ou string")):
     state.maybe_reload()
     return state.ext.find_method_by_hash(hash)
 
@@ -214,4 +227,4 @@ def route(q: RouteQuery):
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("extapi_http:app", host="0.0.0.0", port=int(os.getenv("PORT","3737")), reload=False)
+    uvicorn.run("extapi_http:app", host="0.0.0.0", port=int(os.getenv("PORT", "3737")), reload=False)
