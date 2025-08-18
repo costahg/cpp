@@ -1,4 +1,4 @@
-FROM cgr.dev/chainguard/python:3.11
+FROM cgr.dev/chainguard/python:latest-dev
 
 WORKDIR /app
 
@@ -16,5 +16,5 @@ ENV EXTAPI_JSON=/app/extension_api.json \
 
 EXPOSE 3737
 
-# Chainguard já usa usuário não-root por padrão
+# Chainguard já usa usuário não-root
 CMD ["uvicorn", "extapi_http:app", "--host", "0.0.0.0", "--port", "3737"]
