@@ -28,37 +28,37 @@ VALID_CONFIGS = {
     if c.strip()
 }
 
-# Abrir docs/OpenAPI sem chave somente quando habilitado
 OPEN_DOCS = os.getenv("OPEN_DOCS", "0") == "1"
 DOCS_URL = "/docs" if OPEN_DOCS else None
 REDOC_URL = "/redoc" if OPEN_DOCS else None
 OPENAPI_URL = "/openapi.json" if OPEN_DOCS else None
 
 OPEN_PATHS = {"/health"}
-if OPEN_DOCS:
+# Se quiser docs públicos sem chave, inclua DOCS_PUBLIC=1
+DOCS_PUBLIC = os.getenv("DOCS_PUBLIC", "0") == "1"
+if OPEN_DOCS and DOCS_PUBLIC:
     OPEN_PATHS.update({p for p in [DOCS_URL, REDOC_URL, OPENAPI_URL] if p})
 
 # --- App ------------------------------------------------------------------
 
 app = FastAPI(
     title="extapi_http",
-    version="1.0.3",
+    version="1.0.4",
     docs_url=DOCS_URL,
     redoc_url=REDOC_URL,
     openapi_url=OPENAPI_URL,
 )
 
-# wildcard, sem credentials para não conflitar CORS
+# wildcard "*" não deve combinar com credentials=True
 allow_credentials = True
 if any(o == "*" for o in ALLOWED_ORIGINS):
     allow_credentials = False
 
-# CORS mais estrito, suficiente para CA e browsers
 app.add_middleware(
     CORSMiddleware,
     allow_origins=ALLOWED_ORIGINS,
     allow_credentials=allow_credentials,
-    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_methods=["GET", "POST", "OPTIONS", "HEAD"],
     allow_headers=["authorization", "x-api-key", "content-type", "accept", "origin"],
 )
 
@@ -92,22 +92,19 @@ class _ApiState:
     def mtime(self) -> float:
         return self._mtime
 
-
 state = _ApiState(EXTAPI_JSON)
 
 # --- Auth middleware ------------------------------------------------------
 
 @app.middleware("http")
 async def api_key_guard(request: Request, call_next):
-    # Preflight passa sem exigir chave
-    if request.method == "OPTIONS":
+    # Preflight/HEAD passam sem chave
+    if request.method in ("OPTIONS", "HEAD"):
         return await call_next(request)
 
-    # Sem API key configurada, segue aberto
     if not API_KEY:
         return await call_next(request)
 
-    # Paths públicos
     if request.url.path in OPEN_PATHS:
         return await call_next(request)
 
@@ -154,6 +151,7 @@ def health():
         "allowed_origins": ALLOWED_ORIGINS,
         "json_mtime": state.mtime,
         "open_docs": OPEN_DOCS,
+        "docs_public": DOCS_PUBLIC,
         "allow_credentials": allow_credentials,
     }
 
@@ -249,6 +247,14 @@ def builtin_offset(name: str, member: str, config: str = "float_32"):
 def native_structs():
     state.maybe_reload()
     return state.ext.list_native_structs()
+
+@app.get("/native_structs/{name}")
+def native_struct_detail(name: str):
+    state.maybe_reload()
+    ns = state.ext.get_native_struct(name)
+    if not ns:
+        raise HTTPException(status_code=404, detail="native struct não encontrada")
+    return ns
 
 @app.get("/global_constants/names")
 def global_constants_names():
