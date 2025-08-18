@@ -1,6 +1,4 @@
-FROM python:3.11-slim
-
-ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1
+FROM cgr.dev/chainguard/python:3.11
 
 WORKDIR /app
 
@@ -11,10 +9,6 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Código e dados
 COPY extapi_core.py extapi_http.py extension_api.json ./
 
-# Usuário não-root
-RUN useradd -m appuser && chown -R appuser:appuser /app
-USER appuser
-
 # Config do serviço
 ENV EXTAPI_JSON=/app/extension_api.json \
     HOST=0.0.0.0 \
@@ -22,4 +16,5 @@ ENV EXTAPI_JSON=/app/extension_api.json \
 
 EXPOSE 3737
 
+# Chainguard já usa usuário não-root por padrão
 CMD ["uvicorn", "extapi_http:app", "--host", "0.0.0.0", "--port", "3737"]
