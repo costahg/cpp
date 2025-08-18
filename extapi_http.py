@@ -73,6 +73,10 @@ def _normalize(s: Optional[str]) -> Optional[str]:
 
 @app.middleware("http")
 async def api_key_guard(request: Request, call_next):
+    # ✅ deixa o preflight passar SEM exigir chave
+    if request.method == "OPTIONS":
+        return await call_next(request)
+
     if not API_KEY:
         return await call_next(request)
     if request.url.path in OPEN_PATHS:
@@ -84,8 +88,8 @@ async def api_key_guard(request: Request, call_next):
         if auth and auth.lower().startswith("bearer "):
             incoming = auth[7:]
 
-    incoming = _normalize(incoming)
-    expected = _normalize(API_KEY)
+    incoming = (incoming or "").strip()
+    expected = (API_KEY or "").strip()
 
     if not incoming or incoming != expected:
         return JSONResponse(status_code=401, content={"detail": "invalid or missing API key"})
