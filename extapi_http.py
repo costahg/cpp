@@ -13,16 +13,56 @@ from pydantic import BaseModel
 
 import extapi_core
 
-EXTAPI_JSON = Path(os.getenv("EXTAPI_JSON", "extension_api.json")).resolve()
-ALLOWED_ORIGINS = [o.strip() for o in os.getenv("ALLOWED_ORIGINS", "https://cpp.lizapeproprio.shop").split(",") if o.strip()]
-API_KEY = os.getenv("EXTAPI_KEY", "")
-VALID_CONFIGS = set(c.strip() for c in os.getenv("EXTAPI_CONFIGS", "float_32,float_64").split(",") if c.strip())
-OPEN_PATHS = {"/health"}
+# --- Config ---------------------------------------------------------------
 
-# liberar docs/openapi sem chave apenas quando ligado
+EXTAPI_JSON = Path(os.getenv("EXTAPI_JSON", "extension_api.json")).resolve()
+ALLOWED_ORIGINS = [
+    o.strip()
+    for o in os.getenv("ALLOWED_ORIGINS", "https://cpp.lizapeproprio.shop").split(",")
+    if o.strip()
+]
+API_KEY = os.getenv("EXTAPI_KEY", "")
+VALID_CONFIGS = {
+    c.strip()
+    for c in os.getenv("EXTAPI_CONFIGS", "float_32,float_64").split(",")
+    if c.strip()
+}
+
+# Abrir docs/OpenAPI sem chave somente quando habilitado
 OPEN_DOCS = os.getenv("OPEN_DOCS", "0") == "1"
+DOCS_URL = "/docs" if OPEN_DOCS else None
+REDOC_URL = "/redoc" if OPEN_DOCS else None
+OPENAPI_URL = "/openapi.json" if OPEN_DOCS else None
+
+OPEN_PATHS = {"/health"}
 if OPEN_DOCS:
-    OPEN_PATHS.update({"/openapi.json", "/docs", "/redoc"})
+    OPEN_PATHS.update({p for p in [DOCS_URL, REDOC_URL, OPENAPI_URL] if p})
+
+# --- App ------------------------------------------------------------------
+
+app = FastAPI(
+    title="extapi_http",
+    version="1.0.3",
+    docs_url=DOCS_URL,
+    redoc_url=REDOC_URL,
+    openapi_url=OPENAPI_URL,
+)
+
+# wildcard, sem credentials para não conflitar CORS
+allow_credentials = True
+if any(o == "*" for o in ALLOWED_ORIGINS):
+    allow_credentials = False
+
+# CORS mais estrito, suficiente para CA e browsers
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=ALLOWED_ORIGINS,
+    allow_credentials=allow_credentials,
+    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_headers=["authorization", "x-api-key", "content-type", "accept", "origin"],
+)
+
+# --- Estado ---------------------------------------------------------------
 
 class _ApiState:
     def __init__(self, p: Path):
@@ -33,7 +73,7 @@ class _ApiState:
 
     def _load(self):
         if not self.p.exists():
-            raise FileNotFoundError(f"extension_api.json não encontrado em, {self.p}")
+            raise FileNotFoundError(f"extension_api.json não encontrado em {self.p}")
         self._ext = extapi_core.ExtApi(self.p)
         self._mtime = self.p.stat().st_mtime
 
@@ -52,33 +92,22 @@ class _ApiState:
     def mtime(self) -> float:
         return self._mtime
 
+
 state = _ApiState(EXTAPI_JSON)
-app = FastAPI(title="extapi_http", version="1.0.2")
 
-# wildcard => sem credentials para não conflitar CORS
-allow_credentials = True
-if any(o == "*" for o in ALLOWED_ORIGINS):
-    allow_credentials = False
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=ALLOWED_ORIGINS,
-    allow_credentials=allow_credentials,
-    allow_methods=["GET", "POST", "OPTIONS"],
-    allow_headers=["*"],
-)
-
-def _normalize(s: Optional[str]) -> Optional[str]:
-    return s.strip() if s is not None else None
+# --- Auth middleware ------------------------------------------------------
 
 @app.middleware("http")
 async def api_key_guard(request: Request, call_next):
-    # ✅ deixa o preflight passar SEM exigir chave
+    # Preflight passa sem exigir chave
     if request.method == "OPTIONS":
         return await call_next(request)
 
+    # Sem API key configurada, segue aberto
     if not API_KEY:
         return await call_next(request)
+
+    # Paths públicos
     if request.url.path in OPEN_PATHS:
         return await call_next(request)
 
@@ -92,17 +121,27 @@ async def api_key_guard(request: Request, call_next):
     expected = (API_KEY or "").strip()
 
     if not incoming or incoming != expected:
-        return JSONResponse(status_code=401, content={"detail": "invalid or missing API key"})
+        return JSONResponse(
+            status_code=401,
+            headers={"WWW-Authenticate": "Bearer, X-Api-Key"},
+            content={"detail": "invalid or missing API key"},
+        )
 
     return await call_next(request)
 
+# --- Schemas --------------------------------------------------------------
+
 class RouteQuery(BaseModel):
     q: str
+
+# --- Utils ----------------------------------------------------------------
 
 def _validate_config_or_400(config: Optional[str]) -> None:
     if config and VALID_CONFIGS and config not in VALID_CONFIGS:
         valid = ", ".join(sorted(VALID_CONFIGS))
         raise HTTPException(status_code=400, detail=f"config inválida, use uma destas, {valid}")
+
+# --- Rotas ----------------------------------------------------------------
 
 @app.get("/health")
 def health():
@@ -229,6 +268,13 @@ def route(q: RouteQuery):
     state.maybe_reload()
     return state.ext.route(q.q)
 
+# --- Main -----------------------------------------------------------------
+
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("extapi_http:app", host="0.0.0.0", port=int(os.getenv("PORT", "3737")), reload=False)
+    uvicorn.run(
+        "extapi_http:app",
+        host="0.0.0.0",
+        port=int(os.getenv("PORT", "3737")),
+        reload=False,
+    )
