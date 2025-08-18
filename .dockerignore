@@ -1,10 +1,10 @@
 .git
 __pycache__/
-*.pyc
-*.pyo
-*.pyd
+*.py[cod]
 *.log
 .env
 .vscode/
 .idea/
 .DS_Store
+dist/
+build/
