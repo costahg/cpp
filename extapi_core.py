@@ -405,90 +405,127 @@ class ExtApi:
         return None
 
     
-    def route(self, q: str) -> Dict[str, Any]:
-        ql = q.lower()
-        # 1) Builtin layout/offset/size FIRST (para não confundir "Color.a" com enum de classe)
-        if ("layout" in ql or "tamanho" in ql or "size" in ql or "offset" in ql):
-            bn = self._extract_known(q, list(self.ix.builtin_classes_by_name.keys()))
-            if bn:
-                if "offset" in ql and "." in q:
-                    m3 = re.search(r"\b([A-Za-z][A-Za-z0-9_]*)\s*\.\s*([a-zA-Z_]\w*)\b", q)
-                    if m3:
-                        cls = self._extract_known(m3.group(1), list(self.ix.builtin_classes_by_name.keys())) or m3.group(1)
-                        member = m3.group(2)
-                        off = self.get_builtin_member_offset(cls, member)
-                        if off is not None:
-                            return {"action": "builtin_member_offset", "params": {"config": "float_32", "class": cls, "member": member}, "result": {"offset": off}}
-                lay = self.get_builtin_layout(bn)
-                if lay:
-                    return {"action": "builtin_layout", "params": {"class": bn, "config": lay["config"]}, "result": lay}
 
-        # 2) hash de método
-        m = re.search(r"hash\s*[:=]?\s*(\d+)", ql)
+    # ------------------
+    # Native structures
+    # ------------------
+    def list_native_structs(self) -> List[str]:
+        """Return sorted native struct names."""
+        try:
+            return sorted(self.ix.native_structs_by_name.keys())
+        except Exception:
+            return []
+
+    def get_native_struct(self, name: str) -> Optional[Dict[str, Any]]:
+        """Return a native struct dict by name, case-insensitive."""
+        d = self.ix.native_structs_by_name.get(name)
+        if d:
+            return d
+        lname = name.lower()
+        for k, v in self.ix.native_structs_by_name.items():
+            if k.lower() == lname:
+                return v
+        return None
+
+    
+    def route(self, q: str) -> Dict[str, Any]:
+        """Lightweight NL router for common queries.
+
+        Supports:
+        - "layout de Color", "offset de Color.a", "tamanho de Vector3"
+        - "classe Node", "class Node"
+        - "Node.ProcessMode" (enum de classe) e enums globais por nome
+        - "hash 3905245786" (método por hash)
+        - "método add_child" / "method add_child" / nome simples de método "add_child"
+        Fallback: exemplos de uso.
+        """
+        ql = q.lower().strip()
+
+        # 0) hash de método
+        m = re.search(r"\bhash\s*([0-9]{3,}|0x[0-9a-f]+)\b", ql)
         if m:
             h = m.group(1)
             return {"action": "method_by_hash", "params": {"hash": h}, "result": self.find_method_by_hash(h)}
 
-        # 3) Detalhes de builtin (métodos/operadores/constructors/members)
-        if "builtin" in ql:
-            m4 = re.search(r"\bbuiltin\s+([A-Za-z][A-Za-z0-9_]*)\b", q, flags=re.IGNORECASE)
-            if not m4:
-                m4 = re.search(r"\b([A-Za-z][A-Za-z0-9_]*)\s+builtin\b", q, flags=re.IGNORECASE)
-            nm = None
-            if m4:
-                nm = m4.group(1)
-            else:
-                nm = self._extract_known(q, list(self.ix.builtin_classes_by_name.keys()))
-            if nm:
-                data = self.get_builtin(nm)
-                return {"action": "builtin", "params": {"class": nm}, "result": data}
+        # 1) builtin layout/offset/size (não confundir Color.a com enum)
+        # tenta achar um builtin conhecido na frase
+        bn_key = self._resolve_builtin_key(self._extract_known(q, list(self.ix.builtin_classes_by_name.keys())) or "")
+        if bn_key:
+            # offset de Builtin.member
+            if "offset" in ql and "." in q:
+                m3 = re.search(r"\b([A-Za-z][A-Za-z0-9_]*)\s*\.\s*([a-zA-Z_]\w*)\b", q)
+                if m3:
+                    cls = self._resolve_builtin_key(m3.group(1)) or m3.group(1)
+                    member = m3.group(2)
+                    off = self.get_builtin_member_offset(cls, member)
+                    if off is not None:
+                        return {"action": "builtin_member_offset", "class": cls, "member": member, "result": {"offset": off}}
+            # layout / tamanho
+            if "layout" in ql or "tamanho" in ql or "size" in ql:
+                lay = self.get_builtin_layout(bn_key)
+                if lay:
+                    return {"action": "builtin_layout", "class": bn_key, "result": lay}
 
-        # 4) Classe.Enum (depois de tratar builtin Color.a)
-        m2 = re.search(r"\b([A-Za-z][A-Za-z0-9_]*)\.([A-Za-z][A-Za-z0-9_]*)\b", q)
-        if m2:
-            qual = f"{m2.group(1)}.{m2.group(2)}"
-            return {"action": "class_enum", "params": {"qualified": qual}, "result": self.get_class_enum(qual)}
+        # 2) enum de classe qualificado: Algo.EnumName
+        m_enumq = re.search(r"\b([A-Za-z][A-Za-z0-9_]*)\s*\.\s*([A-Za-z][A-Za-z0-9_]*)\b", q)
+        if m_enumq:
+            qual = f"{m_enumq.group(1)}.{m_enumq.group(2)}"
+            e = self.get_class_enum(qual)
+            if e:
+                return {"action": "class_enum", "name": qual, "result": e}
 
+        # 3) classe
+        m_class = re.search(r"\b(classe|class)\s+([A-Za-z_][\w:]*)\b", q, flags=re.I)
+        if m_class:
+            nm = m_class.group(2)
+            c = self.get_class(nm)
+            if c:
+                return {"action": "class", "name": nm, "result": c}
 
-        # 5) classe
-        if "classe" in ql or "class" in ql:
-            # tenta capturar explicitamente o nome após 'classe'/'class'
-            m5 = re.search(r"\b(?:classe|class)\s+([A-Za-z][A-Za-z0-9_]*)\b", q, flags=re.IGNORECASE)
-            cname = None
-            if m5:
-                cname = m5.group(1)
-            else:
-                # fallback: procurar um nome de classe conhecido na frase inteira (case-insensitive)
-                cname = self._extract_known(q, list(self.ix.classes_by_name.keys()))
-            if cname:
-                return {"action": "class", "params": {"name": cname}, "result": self.list_class_items(cname)}
-    
+        # 4) método nomeado: "método X"/"method X"/"função X"
+        m_met = re.search(r"\b(m[ée]todo|method|fun[cç][aã]o|function)\s+([A-Za-z_]\w*)\b", q, flags=re.I)
+        if m_met:
+            name = m_met.group(2)
+            found = self.find_methods(name)
+            if found:
+                return {"action": "find_methods", "name": name, "result": [self._sig_dict(cls, md) for cls, md in found]}
 
-        # 6) método
-        if "método" in ql or "metodo" in ql or "method" in ql:
-            m6 = re.search(r"\b([A-Za-z_]\w*)\b", q)
-            if m6:
-                nm = m6.group(1)
-                return {"action": "method_by_name", "params": {"name": nm}, "result": self.find_methods(nm)}
+        # 5) nome simples de método presente no índice global
+        simple = self._extract_known(q, list(self.ix.methods_by_name.keys()))
+        if simple:
+            found = self.find_methods(simple)
+            if found:
+                return {"action": "find_methods", "name": simple, "result": [self._sig_dict(cls, md) for cls, md in found]}
 
+        # 6) enums globais por nome (fallthrough depois de métodos para evitar colisão)
+        nm = self._extract_known(q, list(self.ix.global_enums_by_name.keys()))
+        if nm:
+            e = self.get_global_enum(nm)
+            if e:
+                return {"action": "global_enum", "name": nm, "result": e}
+
+        # 7) builtin por nome
+        bn = self._extract_known(q, list(self.ix.builtin_classes_by_name.keys()))
+        if bn:
+            data = self.get_builtin(bn)
+            if data:
+                return {"action": "builtin", "name": bn, "result": data}
+
+        # 8) ajuda
         return {
             "action": "help",
-            "hints": [
-                "Exemplos:",
+            "examples": [
+                "classe Node",
+                "método add_child",
+                "Node.ProcessMode",
                 "builtin Color",
                 "layout de Color",
                 "offset de Color.a",
                 "tamanho de Vector3",
-                "classe Node",
-                "método add_child",
-                "Node.ProcessMode",
+                "hash 3905245786",
             ],
         }
 
-    # -------------------
-    # Utilitários de formatação
-    # -------------------
-    @staticmethod
     def _fmt_type(t: Optional[str | Dict[str, Any]]) -> str:
         if not t:
             return "void"
