@@ -1,43 +1,28 @@
-# Dockerfile
-FROM cgr.dev/chainguard/python:latest-dev
-
-# Ambiente “clean”
-ENV LANG=C.UTF-8 \
-    PYTHONDONTWRITEBYTECODE=1 \
-    PYTHONUNBUFFERED=1
+# syntax=docker/dockerfile:1.7
+FROM cgr.dev/chainguard/python:latest
 
 WORKDIR /app
 
-# Cria venv e põe no PATH (conforme guia da Chainguard)
-RUN python -m venv /app/venv
-ENV PATH="/app/venv/bin:${PATH}"
-
-# Dependências
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
-
-# Código + dados
-COPY extapi_core.py extapi_http.py extension_api.json ./
-
-# Config do serviço
-ENV EXTAPI_JSON=/app/extension_api.json \
+# Configuração padrão
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    EXTAPI_JSON=/app/extension_api.json \
     HOST=0.0.0.0 \
     PORT=3737
 
+# Dependências
+COPY requirements.txt .
+RUN python -m pip install --no-cache-dir --user -r requirements.txt
+
+# Código e dados
+# (COPY --chmod precisa de BuildKit; o Coolify já usa BuildKit por padrão)
+COPY --chmod=0644 extapi_core.py extapi_http.py extension_api.json ./
+
 EXPOSE 3737
 
-# Healthcheck sem curl/wget (usa só a stdlib do Python)
+# Healthcheck usando python -c (nada de heredoc no Dockerfile)
 HEALTHCHECK --interval=15s --timeout=3s --start-period=10s --retries=3 \
-  CMD python - <<'PY' || exit 1
-import os, sys, urllib.request
-u = f"http://127.0.0.1:{os.environ.get('PORT','3737')}/health"
-try:
-    with urllib.request.urlopen(u, timeout=2) as r:
-        sys.exit(0 if r.status == 200 else 1)
-except Exception:
-    sys.exit(1)
-PY
+  CMD python -c "import os,urllib.request; u=f'http://127.0.0.1:{os.environ.get(\"PORT\",\"3737\")}/health'; urllib.request.urlopen(u, timeout=2).read();" || exit 1
 
-# **Ponto crítico**: sobrescreve o ENTRYPOINT da imagem base.
-# Assim, não acontece mais "python uvicorn" acidental.
-ENTRYPOINT ["python","-m","uvicorn","extapi_http:app","--host","0.0.0.0","--port","3737"]
+# Rode uvicorn pelo módulo para evitar problemas de PATH (~/.local/bin)
+CMD ["python", "-m", "uvicorn", "extapi_http:app", "--host", "0.0.0.0", "--port", "3737"]
