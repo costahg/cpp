@@ -3,10 +3,10 @@
 """
 extapi_core.py — Núcleo simples para ler e consultar o extension_api.json (Godot 4.4)
 
-v0.3.1 — robustez do roteador para Builtin (case-insensitive) e pequenos ajustes
-- route("builtin Color") e route("builtin color") agora funcionam igualmente.
-- Detecção de nome em "layout de X" tenta casar com nomes conhecidos de builtins.
-- Mantém cobertura ampla de builtin_classes (membros, construtores, operadores, métodos, constantes) e layout.
+v0.3.2 — correções de 500 e pequenos ajustes
+- FIX: _fmt_type agora é @staticmethod (corrige /class/<X>/items).
+- FIX: route() não re-formata a saída de find_methods() (corrige POST /route).
+- Mantidas as melhorias de robustez para builtins e roteamento (v0.3.1).
 """
 
 from __future__ import annotations
@@ -73,13 +73,13 @@ class ExtApi:
         methods_by_hash: Dict[str, List[Tuple[str, Dict[str, Any]]]] = {}
         class_enums_qualname: Dict[str, Dict[str, Any]] = {}
 
-        for c in api.get("classes", []) or []:
+        for c in (api.get("classes", []) or []):
             name = c.get("name")
             if not name:
                 continue
             classes_by_name[name] = c
             # Métodos
-            for m in c.get("methods", []) or []:
+            for m in (c.get("methods", []) or []):
                 mn = m.get("name")
                 if not mn:
                     continue
@@ -96,21 +96,21 @@ class ExtApi:
                 elif hv_compat is not None:
                     methods_by_hash.setdefault(str(hv_compat), []).append((name, m))
             # Enums da classe (qualificados: Classe.Enum)
-            for e in c.get("enums", []) or []:
+            for e in (c.get("enums", []) or []):
                 en = e.get("name")
                 if en:
                     class_enums_qualname[f"{name}.{en}"] = e
 
         # Enums globais
         global_enums_by_name: Dict[str, Dict[str, Any]] = {}
-        for e in api.get("global_enums", []) or []:
+        for e in (api.get("global_enums", []) or []):
             en = e.get("name")
             if en:
                 global_enums_by_name[en] = e
 
         # Singletons
         singletons_by_name: Dict[str, str] = {}
-        for s in api.get("singletons", []) or []:
+        for s in (api.get("singletons", []) or []):
             nm = s.get("name")
             tp = s.get("type")
             if nm and tp:
@@ -119,7 +119,7 @@ class ExtApi:
         # Utility
         utility_by_name: Dict[str, Dict[str, Any]] = {}
         utility_by_cat: Dict[str, List[str]] = {}
-        for u in api.get("utility_functions", []) or []:
+        for u in (api.get("utility_functions", []) or []):
             nm = u.get("name")
             if nm:
                 utility_by_name[nm] = u
@@ -128,10 +128,10 @@ class ExtApi:
 
         # Builtins: tamanhos e offsets por configuração
         builtin_sizes: Dict[str, Dict[str, int]] = {}
-        for conf in api.get("builtin_class_sizes", []) or []:
+        for conf in (api.get("builtin_class_sizes", []) or []):
             conf_name = conf.get("build_configuration")
             sizes_map: Dict[str, int] = {}
-            for item in conf.get("sizes", []) or []:
+            for item in (conf.get("sizes", []) or []):
                 bname = item.get("name")
                 size = item.get("size")
                 if bname is not None and size is not None:
@@ -140,10 +140,10 @@ class ExtApi:
                 builtin_sizes[conf_name] = sizes_map
 
         builtin_offsets: Dict[str, Dict[str, List[Dict[str, Any]]]] = {}
-        for conf in api.get("builtin_class_member_offsets", []) or []:
+        for conf in (api.get("builtin_class_member_offsets", []) or []):
             conf_name = conf.get("build_configuration")
             cmap: Dict[str, List[Dict[str, Any]]] = {}
-            for c in conf.get("classes", []) or []:
+            for c in (conf.get("classes", []) or []):
                 bname = c.get("name")
                 members = c.get("members", []) or []
                 if bname:
@@ -153,20 +153,20 @@ class ExtApi:
 
         # Native structures
         native_structs_by_name: Dict[str, Dict[str, Any]] = {}
-        for n in api.get("native_structures", []) or []:
+        for n in (api.get("native_structures", []) or []):
             nn = n.get("name")
             if nn:
                 native_structs_by_name[nn] = n
 
         # Builtin classes (detalhes) e constantes globais
         builtin_classes_by_name: Dict[str, Dict[str, Any]] = {}
-        for b in api.get("builtin_classes", []) or []:
+        for b in (api.get("builtin_classes", []) or []):
             bn = b.get("name")
             if bn:
                 builtin_classes_by_name[bn] = b
 
         global_constants_by_name: Dict[str, Dict[str, Any]] = {}
-        for gc in api.get("global_constants", []) or []:
+        for gc in (api.get("global_constants", []) or []):
             nm = gc.get("name")
             if nm:
                 global_constants_by_name[nm] = gc
@@ -221,23 +221,23 @@ class ExtApi:
             "inherits": c.get("inherits"),
             "is_instantiable": c.get("is_instantiable"),
             "is_refcounted": c.get("is_refcounted"),
-            "methods": [self._fmt_method_sig(m, c.get("name")) for m in c.get("methods", []) or []],
-            "properties": [self._fmt_property(p) for p in c.get("properties", []) or []],
-            "signals": [self._fmt_signal(s) for s in c.get("signals", []) or []],
+            "methods": [self._fmt_method_sig(m, c.get("name")) for m in (c.get("methods", []) or [])],
+            "properties": [self._fmt_property(p) for p in (c.get("properties", []) or [])],
+            "signals": [self._fmt_signal(s) for s in (c.get("signals", []) or [])],
             "constants": [
-                {"name": k.get("name"), "value": k.get("value")} for k in c.get("constants", []) or []
+                {"name": k.get("name"), "value": k.get("value")} for k in (c.get("constants", []) or [])
             ],
             "enums": [
                 {
                     "name": e.get("name"),
-                    "values": [v.get("name") for v in e.get("values", []) or []],
-                } for e in c.get("enums", []) or []
+                    "values": [v.get("name") for v in (e.get("values", []) or [])],
+                } for e in (c.get("enums", []) or [])
             ],
         }
 
     def find_methods(self, name: str, cls: Optional[str] = None) -> List[Dict[str, Any]]:
         out: List[Dict[str, Any]] = []
-        for cname, m in self.ix.methods_by_name.get(name, []) or []:
+        for cname, m in (self.ix.methods_by_name.get(name, []) or []):
             if cls and cname.lower() != cls.lower():
                 continue
             out.append(self._sig_dict(cname, m))
@@ -245,21 +245,21 @@ class ExtApi:
 
     def find_method_by_hash(self, h: str | int) -> List[Dict[str, Any]]:
         hs = str(h)
-        return [self._sig_dict(cname, m) for cname, m in self.ix.methods_by_hash.get(hs, []) or []]
+        return [self._sig_dict(cname, m) for cname, m in (self.ix.methods_by_hash.get(hs, []) or [])]
 
     def get_global_enum(self, name: str) -> Optional[Dict[str, Any]]:
         e = self.ix.global_enums_by_name.get(name)
         if e:
-            return {"name": name, "values": [v.get("name") for v in e.get("values", []) or []]}
+            return {"name": name, "values": [v.get("name") for v in (e.get("values", []) or [])]}
         for k, e in self.ix.global_enums_by_name.items():
             if k.lower() == name.lower():
-                return {"name": k, "values": [v.get("name") for v in e.get("values", []) or []]}
+                return {"name": k, "values": [v.get("name") for v in (e.get("values", []) or [])]}
         return None
 
     def get_class_enum(self, qualified: str) -> Optional[Dict[str, Any]]:
         e = self.ix.class_enums_qualname.get(qualified)
         if e:
-            return {"name": qualified, "values": [v.get("name") for v in e.get("values", []) or []]}
+            return {"name": qualified, "values": [v.get("name") for v in (e.get("values", []) or [])]}
         parts = qualified.split(".")
         if len(parts) == 2:
             cpart, enpart = parts
@@ -272,7 +272,7 @@ class ExtApi:
                 key = f"{cname_real}.{enpart}"
                 e = self.ix.class_enums_qualname.get(key)
                 if e:
-                    return {"name": key, "values": [v.get("name") for v in e.get("values", []) or []]}
+                    return {"name": key, "values": [v.get("name") for v in (e.get("values", []) or [])]}
         return None
 
     def list_singletons(self) -> Dict[str, str]:
@@ -285,11 +285,11 @@ class ExtApi:
         if name:
             u = self.ix.utility_by_name.get(name)
             if u:
-                return {"name": name, "category": u.get("category"), "return_type": (u.get("return_type")), "args": [a.get("type") for a in u.get("arguments", []) or []]}
+                return {"name": name, "category": u.get("category"), "return_type": (u.get("return_type")), "args": [a.get("type") for a in (u.get("arguments", []) or [])]}
             # tenta insensitive
             for k, u in self.ix.utility_by_name.items():
                 if k.lower() == name.lower():
-                    return {"name": k, "category": u.get("category"), "return_type": (u.get("return_type")), "args": [a.get("type") for a in u.get("arguments", []) or []]}
+                    return {"name": k, "category": u.get("category"), "return_type": (u.get("return_type")), "args": [a.get("type") for a in (u.get("arguments", []) or [])]}
             return {}
         if category is not None:
             return {"category": category, "functions": self.ix.utility_by_cat.get(category, [])}
@@ -323,7 +323,7 @@ class ExtApi:
             out["constructors"] = [
                 {
                     "index": c.get("index"),
-                    "args": [a.get("type") for a in c.get("arguments", []) or []]
+                    "args": [a.get("type") for a in (c.get("arguments", []) or [])]
                 } for c in b.get("constructors", [])
             ]
         if b.get("operators"):
@@ -340,7 +340,7 @@ class ExtApi:
                     "name": m.get("name"),
                     "return_type": m.get("return_type"),
                     "is_vararg": m.get("is_vararg", False),
-                    "args": [a.get("type") for a in m.get("arguments", []) or []]
+                    "args": [a.get("type") for a in (m.get("arguments", []) or [])]
                 } for m in b.get("methods", [])
             ]
         return out
@@ -357,7 +357,7 @@ class ExtApi:
         layout = self.get_builtin_layout(name, config)
         if not layout:
             return None
-        for it in layout.get("members", []) or []:
+        for it in (layout.get("members", []) or []):
             if it.get("member") == member:
                 return it.get("offset")
         return None
@@ -404,8 +404,6 @@ class ExtApi:
                 return nm
         return None
 
-    
-
     # ------------------
     # Native structures
     # ------------------
@@ -427,18 +425,8 @@ class ExtApi:
                 return v
         return None
 
-    
     def route(self, q: str) -> Dict[str, Any]:
-        """Lightweight NL router for common queries.
-
-        Supports:
-        - "layout de Color", "offset de Color.a", "tamanho de Vector3"
-        - "classe Node", "class Node"
-        - "Node.ProcessMode" (enum de classe) e enums globais por nome
-        - "hash 3905245786" (método por hash)
-        - "método add_child" / "method add_child" / nome simples de método "add_child"
-        Fallback: exemplos de uso.
-        """
+        """Lightweight NL router para consultas comuns."""
         ql = q.lower().strip()
 
         # 0) hash de método
@@ -447,8 +435,7 @@ class ExtApi:
             h = m.group(1)
             return {"action": "method_by_hash", "params": {"hash": h}, "result": self.find_method_by_hash(h)}
 
-        # 1) builtin layout/offset/size (não confundir Color.a com enum)
-        # tenta achar um builtin conhecido na frase
+        # 1) builtin layout/offset/size
         bn_key = self._resolve_builtin_key(self._extract_known(q, list(self.ix.builtin_classes_by_name.keys())) or "")
         if bn_key:
             # offset de Builtin.member
@@ -488,14 +475,14 @@ class ExtApi:
             name = m_met.group(2)
             found = self.find_methods(name)
             if found:
-                return {"action": "find_methods", "name": name, "result": [self._sig_dict(cls, md) for cls, md in found]}
+                return {"action": "find_methods", "name": name, "result": found}
 
         # 5) nome simples de método presente no índice global
         simple = self._extract_known(q, list(self.ix.methods_by_name.keys()))
         if simple:
             found = self.find_methods(simple)
             if found:
-                return {"action": "find_methods", "name": simple, "result": [self._sig_dict(cls, md) for cls, md in found]}
+                return {"action": "find_methods", "name": simple, "result": found}
 
         # 6) enums globais por nome (fallthrough depois de métodos para evitar colisão)
         nm = self._extract_known(q, list(self.ix.global_enums_by_name.keys()))
@@ -526,6 +513,7 @@ class ExtApi:
             ],
         }
 
+    @staticmethod
     def _fmt_type(t: Optional[str | Dict[str, Any]]) -> str:
         if not t:
             return "void"
@@ -539,7 +527,7 @@ class ExtApi:
 
     def _fmt_method_sig(self, m: Dict[str, Any], cls: Optional[str] = None) -> str:
         ret = self._fmt_type((m.get("return_value") or {}).get("type"))
-        args = ", ".join(self._fmt_arg(a) for a in m.get("arguments", []) or [])
+        args = ", ".join(self._fmt_arg(a) for a in (m.get("arguments", []) or []))
         name = m.get("name", "<unnamed>")
         qual = f"{cls}::{name}" if cls else name
         flags = []
@@ -588,7 +576,7 @@ class ExtApi:
             "class": cls,
             "name": m.get("name"),
             "ret": (m.get("return_value") or {}).get("type"),
-            "args": [a.get("type") for a in m.get("arguments", []) or []],
+            "args": [a.get("type") for a in (m.get("arguments", []) or [])],
             "hash": m.get("hash"),
             "hash_compatibility": m.get("hash_compatibility"),
             "is_static": m.get("is_static") or False,
