@@ -3,10 +3,17 @@
 """
 extapi_core.py — Núcleo simples para ler e consultar o extension_api.json (Godot 4.4)
 
-v0.3.2 — correções de 500 e pequenos ajustes
-- FIX: _fmt_type agora é @staticmethod (corrige /class/<X>/items).
-- FIX: route() não re-formata a saída de find_methods() (corrige POST /route).
-- Mantidas as melhorias de robustez para builtins e roteamento (v0.3.1).
+v0.4.0 — remoções e novo fallback determinístico
+- REMOVIDO: suporte a constantes globais (endpoints e funções).
+- REMOVIDO: roteador NL route(), para evitar heurísticas não determinísticas.
+- NOVO: blob canônico do JSON e mapa de faixas por seção/itens, com busca por range.
+        Isso permite que um agente recupere fatias exatas do documento quando
+        precisar do conteúdo bruto completo, sem estouro de tokens.
+
+Observação: índices de faixa são baseados em uma serialização canônica interna
+(json.dumps com separators=(",", ":"), ensure_ascii=False, sort_keys=False).
+Os endpoints que servem slices usam essa mesma string canônica, garantindo
+consistência entre mapa e recuperação.
 """
 
 from __future__ import annotations
@@ -15,7 +22,6 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import json
 from pathlib import Path
-import re
 
 
 # -------------------------
@@ -37,22 +43,32 @@ class Indexes:
     utility_by_cat: Dict[str, List[str]]                           # "Math" -> ["sin", "cos", ...]
     native_structs_by_name: Dict[str, Dict[str, Any]]              # "PlaceHolder" -> {...}
     builtin_classes_by_name: Dict[str, Dict[str, Any]]             # "Color" -> {...}
-    global_constants_by_name: Dict[str, Dict[str, Any]]            # "OK" -> {...}
 
 
 class ExtApi:
     def __init__(self, json_path: str | Path):
         self.path = Path(json_path)
-        self.api = self._load_api(self.path)
+        self.api_raw_text: str = self._load_text(self.path)              # Texto original (não usado para ranges)
+        self.api: Dict[str, Any] = self._load_api_from_text(self.api_raw_text)
+        self.canon: str = self._to_canonical(self.api)                   # String base para ranges
         self.ix = self._build_indexes(self.api)
 
     # ------------
     # Carregamento
     # ------------
     @staticmethod
-    def _load_api(path: Path) -> Dict[str, Any]:
+    def _load_text(path: Path) -> str:
         with path.open("r", encoding="utf-8") as f:
-            return json.load(f)
+            return f.read()
+
+    @staticmethod
+    def _load_api_from_text(text: str) -> Dict[str, Any]:
+        return json.loads(text)
+
+    @staticmethod
+    def _to_canonical(obj: Any) -> str:
+        # json canônico, usado como "blob" para cálculo de posições
+        return json.dumps(obj, ensure_ascii=False, separators=(",", ":"), sort_keys=False)
 
     # -----------------------
     # Construção dos índices
@@ -158,18 +174,12 @@ class ExtApi:
             if nn:
                 native_structs_by_name[nn] = n
 
-        # Builtin classes (detalhes) e constantes globais
+        # Builtin classes (detalhes)
         builtin_classes_by_name: Dict[str, Dict[str, Any]] = {}
         for b in (api.get("builtin_classes", []) or []):
             bn = b.get("name")
             if bn:
                 builtin_classes_by_name[bn] = b
-
-        global_constants_by_name: Dict[str, Dict[str, Any]] = {}
-        for gc in (api.get("global_constants", []) or []):
-            nm = gc.get("name")
-            if nm:
-                global_constants_by_name[nm] = gc
 
         return Indexes(
             version=version,
@@ -185,7 +195,6 @@ class ExtApi:
             utility_by_cat=utility_by_cat,
             native_structs_by_name=native_structs_by_name,
             builtin_classes_by_name=builtin_classes_by_name,
-            global_constants_by_name=global_constants_by_name,
         )
 
     # ------------------
@@ -200,6 +209,7 @@ class ExtApi:
             "singletons": len(self.ix.singletons_by_name),
             "builtin_classes": len(self.ix.builtin_classes_by_name),
             "native_structures": len(self.ix.native_structs_by_name),
+            "blob_canonical_bytes": len(self.canon),
         }
 
     def get_class(self, name: str) -> Optional[Dict[str, Any]]:
@@ -379,31 +389,6 @@ class ExtApi:
                 return k
         return None
 
-    # -------------------
-    # Constantes globais
-    # -------------------
-    def get_global_constant(self, name: str) -> Optional[Dict[str, Any]]:
-        gc = self.ix.global_constants_by_name.get(name)
-        if gc:
-            return gc
-        for k, v in self.ix.global_constants_by_name.items():
-            if k.lower() == name.lower():
-                return v
-        return None
-
-    def list_global_constants(self) -> List[str]:
-        return sorted(list(self.ix.global_constants_by_name.keys()))
-
-    # ----------
-    # Roteamento
-    # ----------
-    def _extract_known(self, q: str, names: List[str]) -> Optional[str]:
-        """Tenta achar um nome conhecido (case-insensitive) presente na frase inteira."""
-        for nm in sorted(names, key=len, reverse=True):  # nomes mais longos primeiro
-            if re.search(rf"\b{re.escape(nm)}\b", q, flags=re.IGNORECASE):
-                return nm
-        return None
-
     # ------------------
     # Native structures
     # ------------------
@@ -425,94 +410,91 @@ class ExtApi:
                 return v
         return None
 
-    def route(self, q: str) -> Dict[str, Any]:
-        """Lightweight NL router para consultas comuns."""
-        ql = q.lower().strip()
+    # ---------------------------------
+    # Fallback determinístico "ultimo recurso"
+    # ---------------------------------
+    def get_blob_map(self, max_items_per_section: int = 200) -> Dict[str, Any]:
+        """
+        Retorna um mapa com faixas [start, end) (em bytes) para as principais seções
+        e para um subconjunto de itens em cada seção, baseado na string canônica self.canon.
+        """
+        s = self.canon
+        size = len(s)
+        sections: List[Dict[str, Any]] = []
 
-        # 0) hash de método
-        m = re.search(r"\bhash\s*([0-9]{3,}|0x[0-9a-f]+)\b", ql)
-        if m:
-            h = m.group(1)
-            return {"action": "method_by_hash", "params": {"hash": h}, "result": self.find_method_by_hash(h)}
+        def _pair_span_for_array(key: str, arr: List[Any]) -> Tuple[int, int] | None:
+            arr_dump = json.dumps(arr, ensure_ascii=False, separators=(",", ":"), sort_keys=False)
+            pair_dump = f'"{key}":{arr_dump}'
+            pos = s.find(pair_dump)
+            if pos == -1:
+                return None
+            start = pos + len(f'"{key}":')
+            end = start + len(arr_dump)
+            return (start, end)
 
-        # 1) builtin layout/offset/size
-        bn_key = self._resolve_builtin_key(self._extract_known(q, list(self.ix.builtin_classes_by_name.keys())) or "")
-        if bn_key:
-            # offset de Builtin.member
-            if "offset" in ql and "." in q:
-                m3 = re.search(r"\b([A-Za-z][A-Za-z0-9_]*)\s*\.\s*([a-zA-Z_]\w*)\b", q)
-                if m3:
-                    cls = self._resolve_builtin_key(m3.group(1)) or m3.group(1)
-                    member = m3.group(2)
-                    off = self.get_builtin_member_offset(cls, member)
-                    if off is not None:
-                        return {"action": "builtin_member_offset", "class": cls, "member": member, "result": {"offset": off}}
-            # layout / tamanho
-            if "layout" in ql or "tamanho" in ql or "size" in ql:
-                lay = self.get_builtin_layout(bn_key)
-                if lay:
-                    return {"action": "builtin_layout", "class": bn_key, "result": lay}
+        def _items_for_array(key: str, arr: List[Any], name_key: str = "name") -> Dict[str, Any]:
+            span = _pair_span_for_array(key, arr)
+            if not span:
+                return {"key": key, "count": len(arr), "range": None, "items": []}
+            arr_start, arr_end = span
+            items_out: List[Dict[str, Any]] = []
+            cursor = arr_start
+            limit = max(0, int(max_items_per_section))
+            for i, el in enumerate(arr):
+                el_dump = json.dumps(el, ensure_ascii=False, separators=(",", ":"), sort_keys=False)
+                p = s.find(el_dump, cursor, arr_end)
+                if p == -1:
+                    # tenta continuar do cursor sem fixar o item
+                    continue
+                name = None
+                if isinstance(el, dict):
+                    name = el.get(name_key) or el.get("type") or el.get("build_configuration") or None
+                items_out.append({"name": name, "range": [p, p + len(el_dump)]})
+                cursor = p + len(el_dump)
+                if limit and len(items_out) >= limit:
+                    break
+            return {"key": key, "count": len(arr), "range": [arr_start, arr_end], "items": items_out}
 
-        # 2) enum de classe qualificado: Algo.EnumName
-        m_enumq = re.search(r"\b([A-Za-z][A-Za-z0-9_]*)\s*\.\s*([A-Za-z][A-Za-z0-9_]*)\b", q)
-        if m_enumq:
-            qual = f"{m_enumq.group(1)}.{m_enumq.group(2)}"
-            e = self.get_class_enum(qual)
-            if e:
-                return {"action": "class_enum", "name": qual, "result": e}
+        # header
+        header = self.api.get("header", {})
+        header_dump = json.dumps(header, ensure_ascii=False, separators=(",", ":"), sort_keys=False)
+        header_pair = f'"header":{header_dump}'
+        hpos = s.find(header_pair)
+        header_range = None
+        if hpos != -1:
+            hstart = hpos + len('"header":')
+            header_range = [hstart, hstart + len(header_dump)]
 
-        # 3) classe
-        m_class = re.search(r"\b(classe|class)\s+([A-Za-z_][\w:]*)\b", q, flags=re.I)
-        if m_class:
-            nm = m_class.group(2)
-            c = self.get_class(nm)
-            if c:
-                return {"action": "class", "name": nm, "result": c}
+        sections.append(_items_for_array("classes", self.api.get("classes", []) or []))
+        sections.append(_items_for_array("builtin_classes", self.api.get("builtin_classes", []) or []))
+        sections.append(_items_for_array("global_enums", self.api.get("global_enums", []) or []))
+        sections.append(_items_for_array("utility_functions", self.api.get("utility_functions", []) or []))
+        sections.append(_items_for_array("singletons", self.api.get("singletons", []) or []))
+        sections.append(_items_for_array("native_structures", self.api.get("native_structures", []) or []))
+        sections.append(_items_for_array("builtin_class_sizes", self.api.get("builtin_class_sizes", []) or []))
+        sections.append(_items_for_array("builtin_class_member_offsets", self.api.get("builtin_class_member_offsets", []) or []))
 
-        # 4) método nomeado: "método X"/"method X"/"função X"
-        m_met = re.search(r"\b(m[ée]todo|method|fun[cç][aã]o|function)\s+([A-Za-z_]\w*)\b", q, flags=re.I)
-        if m_met:
-            name = m_met.group(2)
-            found = self.find_methods(name)
-            if found:
-                return {"action": "find_methods", "name": name, "result": found}
-
-        # 5) nome simples de método presente no índice global
-        simple = self._extract_known(q, list(self.ix.methods_by_name.keys()))
-        if simple:
-            found = self.find_methods(simple)
-            if found:
-                return {"action": "find_methods", "name": simple, "result": found}
-
-        # 6) enums globais por nome (fallthrough depois de métodos para evitar colisão)
-        nm = self._extract_known(q, list(self.ix.global_enums_by_name.keys()))
-        if nm:
-            e = self.get_global_enum(nm)
-            if e:
-                return {"action": "global_enum", "name": nm, "result": e}
-
-        # 7) builtin por nome
-        bn = self._extract_known(q, list(self.ix.builtin_classes_by_name.keys()))
-        if bn:
-            data = self.get_builtin(bn)
-            if data:
-                return {"action": "builtin", "name": bn, "result": data}
-
-        # 8) ajuda
         return {
-            "action": "help",
-            "examples": [
-                "classe Node",
-                "método add_child",
-                "Node.ProcessMode",
-                "builtin Color",
-                "layout de Color",
-                "offset de Color.a",
-                "tamanho de Vector3",
-                "hash 3905245786",
-            ],
+            "blob": "canonical",
+            "size": size,
+            "header_range": header_range,
+            "sections": sections,
         }
 
+    def get_blob_range(self, start: int, end: int) -> str:
+        """
+        Retorna a substring [start, end) do blob canônico.
+        """
+        s = self.canon
+        if start < 0 or end < 0 or start >= end:
+            return ""
+        start = max(0, start)
+        end = min(len(s), end)
+        return s[start:end]
+
+    # -------------------
+    # Helpers de formatação
+    # -------------------
     @staticmethod
     def _fmt_type(t: Optional[str | Dict[str, Any]]) -> str:
         if not t:
