@@ -8,9 +8,7 @@ from typing import Optional
 
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
-from pydantic import BaseModel
-
+from fastapi.responses import JSONResponse, PlainTextResponse
 import extapi_core
 
 # --- Config ---------------------------------------------------------------
@@ -43,7 +41,7 @@ if OPEN_DOCS and DOCS_PUBLIC:
 
 app = FastAPI(
     title="extapi_http",
-    version="1.0.4",
+    version="1.1.0",
     docs_url=DOCS_URL,
     redoc_url=REDOC_URL,
     openapi_url=OPENAPI_URL,
@@ -125,11 +123,6 @@ async def api_key_guard(request: Request, call_next):
         )
 
     return await call_next(request)
-
-# --- Schemas --------------------------------------------------------------
-
-class RouteQuery(BaseModel):
-    q: str
 
 # --- Utils ----------------------------------------------------------------
 
@@ -256,23 +249,22 @@ def native_struct_detail(name: str):
         raise HTTPException(status_code=404, detail="native struct não encontrada")
     return ns
 
-@app.get("/global_constants/names")
-def global_constants_names():
-    state.maybe_reload()
-    return state.ext.list_global_constants()
+# --- Novo: Mapa do blob canônico e leitura por range ----------------------
 
-@app.get("/global_constants/{name}")
-def global_constant(name: str):
+@app.get("/blob/map")
+def blob_map(max_items_per_section: int = Query(200, ge=0, le=10000)):
     state.maybe_reload()
-    gc = state.ext.get_global_constant(name)
-    if not gc:
-        raise HTTPException(status_code=404, detail="constante global não encontrada")
-    return gc
+    return state.ext.get_blob_map(max_items_per_section=max_items_per_section)
 
-@app.post("/route")
-def route(q: RouteQuery):
+@app.get("/blob/range", response_class=PlainTextResponse)
+def blob_range(start: int = Query(..., ge=0), end: int = Query(..., ge=0)):
     state.maybe_reload()
-    return state.ext.route(q.q)
+    if end <= start:
+        raise HTTPException(status_code=400, detail="end deve ser maior que start")
+    text = state.ext.get_blob_range(start, end)
+    if text == "":
+        raise HTTPException(status_code=416, detail="range inválido")
+    return text
 
 # --- Main -----------------------------------------------------------------
 
